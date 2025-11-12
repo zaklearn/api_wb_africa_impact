@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from typing import Dict, List, Optional
 import google.generativeai as genai
+from anthropic import Anthropic
 import plotly.graph_objects as go
 import plotly.express as px
 import re
@@ -30,34 +31,41 @@ except:
     cache_enabled = False
     st.warning("⚠️ Cache désactivé (système de fichiers en lecture seule)")
 
-# --- GESTION CLÉ API (CORRIGÉE POUR STREAMLIT CLOUD) ---
+# --- GESTION CLÉS API (SUPPORT GEMINI + CLAUDE) ---
 
-def get_api_key() -> Optional[str]:
+def get_api_key(provider: str) -> Optional[str]:
     """
     Récupère la clé API selon la priorité :
     1. Streamlit Secrets (pour déploiement cloud)
     2. Session State (cache en mémoire)
     3. Input utilisateur
+    
+    Args:
+        provider: 'gemini' ou 'claude'
     """
+    key_name = f"{provider.upper()}_API_KEY"
+    session_key = f'cached_{provider}_api_key'
+    
     # Priorité 1 : Streamlit Secrets (configuration cloud)
     try:
-        if "GOOGLE_API_KEY" in st.secrets:
-            api_key = st.secrets["GOOGLE_API_KEY"]
-            st.session_state.cached_api_key = api_key  # Cache en mémoire
+        if key_name in st.secrets:
+            api_key = st.secrets[key_name]
+            st.session_state[session_key] = api_key
             return api_key
     except:
         pass
     
     # Priorité 2 : Session State (cache mémoire)
-    if 'cached_api_key' in st.session_state and st.session_state.cached_api_key:
-        return st.session_state.cached_api_key
+    if session_key in st.session_state and st.session_state[session_key]:
+        return st.session_state[session_key]
     
     # Priorité 3 : Aucune clé disponible
     return None
 
-def save_api_key_to_session(api_key: str):
+def save_api_key_to_session(provider: str, api_key: str):
     """Sauvegarde la clé API en mémoire (session state uniquement)."""
-    st.session_state.cached_api_key = api_key
+    session_key = f'cached_{provider}_api_key'
+    st.session_state[session_key] = api_key
 
 # --- CLASSE API SERVICE ---
 class WorldBankAPI:
@@ -276,10 +284,11 @@ def create_comparison_chart(df: pd.DataFrame, indicator_cols: List[str], year: i
     
     return fig
 
-# --- FONCTION ANALYSE IA ---
-def generate_ai_analysis(data_csv: str, countries: List[str], 
-                        indicators: List[str], api_key: str) -> Optional[str]:
-    """Génère une analyse IA via Gemini"""
+# --- FONCTIONS ANALYSE IA ---
+
+def generate_gemini_analysis(data_csv: str, countries: List[str], 
+                             indicators: List[str], api_key: str) -> Optional[str]:
+    """Génère une analyse IA via Google Gemini"""
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-pro')
@@ -308,6 +317,41 @@ Utilise le format markdown avec des sections claires. Sois précis et facile à 
         st.error(f"Erreur Gemini : {str(e)}")
         return None
 
+def generate_claude_analysis(data_csv: str, countries: List[str], 
+                             indicators: List[str], api_key: str) -> Optional[str]:
+    """Génère une analyse IA via Claude Anthropic"""
+    try:
+        client = Anthropic(api_key=api_key)
+        
+        prompt = f"""Tu es un analyste spécialisé en données éducatives pour l'Afrique. Analyse ce jeu de données et produis un rapport structuré.
+
+**Pays analysés :** {', '.join(countries)}
+**Indicateurs :** {', '.join(indicators)}
+
+**Données CSV :**
+{data_csv}
+
+**Instructions :**
+1. Identifie 3-4 tendances ou patterns clés dans les données
+2. Signale toute anomalie ou écart significatif
+3. Propose 2-3 recommandations concrètes basées sur les données
+
+Utilise le format markdown avec des sections claires. Sois précis et facile à lire."""
+        
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        return message.content[0].text
+        
+    except Exception as e:
+        st.error(f"Erreur Claude : {str(e)}")
+        return None
+
 def format_ai_analysis(analysis_text: str):
     """Formatte l'analyse IA avec style"""
     lines = analysis_text.split('\n')
@@ -326,47 +370,76 @@ def format_ai_analysis(analysis_text: str):
 
 # --- INTERFACE PRINCIPALE ---
 st.title("🎓 Analyse IA des Données Éducatives Africaines")
-st.markdown("*Propulsé par l'API Banque Mondiale & Google Gemini*")
+st.markdown("*Propulsé par l'API Banque Mondiale & IA (Gemini/Claude)*")
 
 # --- SIDEBAR : CONFIGURATION ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # --- GESTION DE LA CLÉ API (CORRIGÉE) ---
-    st.subheader("🔑 Clé API Google")
+    # --- SÉLECTION DU FOURNISSEUR IA ---
+    st.subheader("🤖 Fournisseur d'IA")
+    ai_provider = st.radio(
+        "Choisissez votre moteur d'analyse :",
+        options=["Gemini (Google)", "Claude (Anthropic)", "Mode Démo (Sans API)"],
+        index=0,
+        help="Gemini est gratuit jusqu'à 15 req/min. Claude offre une analyse plus approfondie."
+    )
     
-    # Vérifier si une clé existe déjà
-    existing_key = get_api_key()
-    
-    if existing_key:
-        st.success("✅ Clé API configurée")
-        if st.button("🔄 Changer la clé API"):
-            st.session_state.cached_api_key = None
-            st.rerun()
-        GOOGLE_API_KEY = existing_key
+    # Mapper le choix
+    if "Gemini" in ai_provider:
+        selected_provider = "gemini"
+        provider_name = "Google Gemini"
+        api_link = "https://makersuite.google.com/app/apikey"
+    elif "Claude" in ai_provider:
+        selected_provider = "claude"
+        provider_name = "Claude (Anthropic)"
+        api_link = "https://console.anthropic.com/account/keys"
     else:
-        st.info("Configurez votre clé API Google Gemini")
-        st.markdown("[Obtenir une clé API gratuite](https://makersuite.google.com/app/apikey)")
-        
-        api_input = st.text_input(
-            "Clé API",
-            type="password",
-            placeholder="AIzaSy..."
-        )
-        
-        if api_input:
-            save_api_key_to_session(api_input)
-            GOOGLE_API_KEY = api_input
-            st.success("✅ Clé API sauvegardée en mémoire")
-            st.rerun()
-        else:
-            GOOGLE_API_KEY = None
+        selected_provider = "demo"
+        provider_name = "Mode Démo"
+        api_link = None
     
-    # Mode démo si pas de clé
-    use_demo_mode = False
-    if not GOOGLE_API_KEY:
-        st.warning("⚠️ Aucune clé API : passage en mode démo")
+    # --- GESTION DE LA CLÉ API ---
+    if selected_provider != "demo":
+        st.subheader(f"🔑 Clé API {provider_name}")
+        
+        # Vérifier si une clé existe déjà
+        existing_key = get_api_key(selected_provider)
+        
+        if existing_key:
+            st.success(f"✅ Clé API {provider_name} configurée")
+            if st.button(f"🔄 Changer la clé {provider_name}"):
+                st.session_state[f'cached_{selected_provider}_api_key'] = None
+                st.rerun()
+            AI_API_KEY = existing_key
+        else:
+            st.info(f"Configurez votre clé API {provider_name}")
+            if api_link:
+                st.markdown(f"[Obtenir une clé API]({api_link})")
+            
+            api_input = st.text_input(
+                "Clé API",
+                type="password",
+                placeholder="sk-ant-..." if selected_provider == "claude" else "AIzaSy...",
+                key=f"{selected_provider}_api_input"
+            )
+            
+            if api_input:
+                save_api_key_to_session(selected_provider, api_input)
+                AI_API_KEY = api_input
+                st.success(f"✅ Clé API {provider_name} sauvegardée en mémoire")
+                st.rerun()
+            else:
+                AI_API_KEY = None
+        
+        # Mode démo si pas de clé
+        use_demo_mode = not AI_API_KEY
+        if use_demo_mode:
+            st.warning(f"⚠️ Aucune clé API {provider_name} : passage en mode démo")
+    else:
         use_demo_mode = True
+        AI_API_KEY = None
+        st.info("ℹ️ Mode démo activé (données pré-calculées)")
     
     st.markdown("---")
     
@@ -427,13 +500,15 @@ if st.session_state.analysis_running:
     
     # Afficher les sélections
     with st.expander("📋 Résumé de la configuration", expanded=False):
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.write("**Pays :**", ", ".join(selected_country_names))
         with col2:
             st.write("**Indicateurs :**", len(selected_indicators))
         with col3:
             st.write("**Période :**", f"{year_range[0]}-{year_range[1]}")
+        with col4:
+            st.write("**IA :**", f"{'🤖 '+provider_name if not use_demo_mode else '📝 Démo'}")
     
     # Créer barre de progression
     progress_bar = st.progress(0, text="Initialisation...")
@@ -603,26 +678,37 @@ if st.session_state.analysis_running:
             )
         
         # --- ÉTAPE 3 : ANALYSE IA ---
-        with st.spinner("Étape 3/3 : L'IA analyse les tendances et génère les recommandations..."):
+        with st.spinner(f"Étape 3/3 : L'IA {provider_name} analyse les tendances et génère les recommandations..."):
             if use_demo_mode:
-                st.subheader("3. Analyse & Recommandations")
+                st.subheader("3. Analyse & Recommandations (Mode Démo)")
                 format_ai_analysis(DEMO_RESPONSE)
+                st.info("💡 Configurez une clé API Gemini ou Claude pour des analyses personnalisées.")
             else:
-                st.subheader("3. Analyse & Recommandations")
+                st.subheader(f"3. Analyse & Recommandations ({provider_name})")
                 
                 data_csv = pivot_df.to_csv(index=False)
-                analysis = generate_ai_analysis(
-                    data_csv, 
-                    selected_country_names, 
-                    selected_indicator_names,
-                    GOOGLE_API_KEY
-                )
+                
+                # Appel à l'IA appropriée
+                if selected_provider == "gemini":
+                    analysis = generate_gemini_analysis(
+                        data_csv, 
+                        selected_country_names, 
+                        selected_indicator_names,
+                        AI_API_KEY
+                    )
+                else:  # claude
+                    analysis = generate_claude_analysis(
+                        data_csv, 
+                        selected_country_names, 
+                        selected_indicator_names,
+                        AI_API_KEY
+                    )
                 
                 if analysis:
                     format_ai_analysis(analysis)
-                    st.success("✅ Analyse générée avec succès par Gemini.")
+                    st.success(f"✅ Analyse générée avec succès par {provider_name}.")
                 else:
-                    st.error("L'analyse IA a échoué. Vérifiez la clé API et la console.")
+                    st.error(f"L'analyse IA {provider_name} a échoué. Vérifiez la clé API et la console.")
 
 else:
     st.info("👈 Utilisez la barre latérale pour configurer votre analyse et cliquez sur 'Lancer l'Analyse'.")
@@ -651,3 +737,18 @@ if cache_enabled:
         st.sidebar.success(f"{count} fichiers cache vidés!")
 else:
     st.sidebar.markdown("**Cache API :** Désactivé (cloud)")
+
+# Afficher info sur le fournisseur d'IA dans le footer
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🤖 À propos des IA")
+st.sidebar.markdown("""
+**Google Gemini:**
+- ✅ Gratuit (15 req/min)
+- ⚡ Rapide
+- 🎯 Bon pour analyses courtes
+
+**Claude (Anthropic):**
+- 💎 Payant (crédits gratuits disponibles)
+- 🧠 Plus approfondi
+- 📊 Excellent pour analyses complexes
+""")
