@@ -282,7 +282,7 @@ def generate_ai_analysis(data_csv: str, countries: List[str],
     """Génère une analyse IA via Gemini"""
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-pro')
         
         prompt = f"""
 Tu es un analyste spécialisé en données éducatives pour l'Afrique. Analyse ce jeu de données et produis un rapport structuré.
