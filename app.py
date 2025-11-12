@@ -29,26 +29,26 @@ SECRETS_PATH = Path(".streamlit/secrets.toml")
 
 # --- GESTION CLÉ API (Votre demande) ---
 
-# --- GESTION CLÉ API (Version pour Streamlit Cloud) ---
-st.sidebar.subheader("Configuration IA")
+def load_cached_api_key() -> Optional[str]:
+    """Charge la clé API depuis .streamlit/secrets.toml si elle existe."""
+    if SECRETS_PATH.exists():
+        try:
+            with open(SECRETS_PATH, 'r') as f:
+                data = toml.load(f)
+                return data.get("GOOGLE_API_KEY")
+        except Exception as e:
+            st.error(f"Erreur en chargeant secrets.toml : {e}")
+    return None
 
-try:
-    # Tente de charger la clé depuis les secrets de Streamlit Cloud
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    st.sidebar.success("Clé API Gemini chargée depuis les secrets.")
-except:
-    # Si la clé n'est pas trouvée
-    st.sidebar.error("Clé API (GOOGLE_API_KEY) non trouvée dans les secrets Streamlit.")
-    st.error("L'application ne peut pas fonctionner sans clé API. Veuillez l'ajouter dans les 'Secrets' de l'application.")
-    GOOGLE_API_KEY = None # Définit la clé comme None pour éviter les plantages
-    st.session_state.analysis_running = False # Arrête l'analyse
-
-# Mode Démo
-use_demo_mode = st.sidebar.checkbox(
-    "✅ Activer le Mode Démo (Recommandé)", 
-    value=True,
-    help="Utilise une réponse IA pré-enregistrée pour une démo instantanée."
-)
+def save_cached_api_key(api_key: str):
+    """Sauvegarde la clé API dans .streamlit/secrets.toml."""
+    try:
+        SECRETS_PATH.parent.mkdir(exist_ok=True)
+        data = {"GOOGLE_API_KEY": api_key}
+        with open(SECRETS_PATH, 'w') as f:
+            toml.dump(data, f)
+    except Exception as e:
+        st.error(f"Impossible de sauvegarder la clé API : {e}")
 
 # --- CLASSE API SERVICE (inspirée de api_service.py) ---
 class WorldBankAPI:
