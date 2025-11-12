@@ -448,7 +448,7 @@ with st.sidebar:
     selected_countries = st.multiselect(
         "Choisissez 2-5 pays africains",
         options=sorted(AFRICAN_COUNTRIES.keys()),
-        default=['Maroc', 'Sénégal', 'Kenya'],
+        #default=['Maroc', 'Sénégal', 'Kenya'],
         max_selections=5
     )
     
@@ -738,17 +738,5 @@ if cache_enabled:
 else:
     st.sidebar.markdown("**Cache API :** Désactivé (cloud)")
 
-# Afficher info sur le fournisseur d'IA dans le footer
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🤖 À propos des IA")
-st.sidebar.markdown("""
-**Google Gemini:**
-- ✅ Gratuit (15 req/min)
-- ⚡ Rapide
-- 🎯 Bon pour analyses courtes
 
-**Claude (Anthropic):**
-- 💎 Payant (crédits gratuits disponibles)
-- 🧠 Plus approfondi
-- 📊 Excellent pour analyses complexes
-""")
+
