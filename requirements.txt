@@ -1,4 +1,17 @@
-streamlit
-google-generativeai
-pandas
-plotly
+# Streamlit - Framework web
+streamlit>=1.28.0
+
+# Data manipulation
+pandas>=2.0.0
+
+# API requests
+requests>=2.31.0
+
+# Google Gemini AI
+google-generativeai>=0.3.0
+
+# Data visualization
+plotly>=5.17.0
+
+# Note: Le module 'toml' n'est plus nécessaire car on utilise st.secrets
+# Note: 'pickle' est inclus dans la bibliothèque standard Python

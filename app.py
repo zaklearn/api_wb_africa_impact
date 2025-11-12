@@ -8,8 +8,7 @@ from typing import Dict, List, Optional
 import google.generativeai as genai
 import plotly.graph_objects as go
 import plotly.express as px
-import toml  # Ajouté pour gérer le cache de la clé API
-import re    # Ajouté (depuis la fonction format_ai_analysis)
+import re
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -17,40 +16,50 @@ st.set_page_config(
     page_icon="🎓",
     layout="wide"
 )
+
 # Initialiser le session state
 if 'analysis_running' not in st.session_state:
     st.session_state.analysis_running = False
-# Créer dossier cache
-CACHE_DIR = Path("data_cache")
-CACHE_DIR.mkdir(exist_ok=True)
 
-# Définir le chemin pour le cache de la clé API
-SECRETS_PATH = Path(".streamlit/secrets.toml")
+# Créer dossier cache (seulement en local, pas sur Streamlit Cloud)
+try:
+    CACHE_DIR = Path("data_cache")
+    CACHE_DIR.mkdir(exist_ok=True)
+    cache_enabled = True
+except:
+    cache_enabled = False
+    st.warning("⚠️ Cache désactivé (système de fichiers en lecture seule)")
 
-# --- GESTION CLÉ API (Votre demande) ---
+# --- GESTION CLÉ API (CORRIGÉE POUR STREAMLIT CLOUD) ---
 
-def load_cached_api_key() -> Optional[str]:
-    """Charge la clé API depuis .streamlit/secrets.toml si elle existe."""
-    if SECRETS_PATH.exists():
-        try:
-            with open(SECRETS_PATH, 'r') as f:
-                data = toml.load(f)
-                return data.get("GOOGLE_API_KEY")
-        except Exception as e:
-            st.error(f"Erreur en chargeant secrets.toml : {e}")
+def get_api_key() -> Optional[str]:
+    """
+    Récupère la clé API selon la priorité :
+    1. Streamlit Secrets (pour déploiement cloud)
+    2. Session State (cache en mémoire)
+    3. Input utilisateur
+    """
+    # Priorité 1 : Streamlit Secrets (configuration cloud)
+    try:
+        if "GOOGLE_API_KEY" in st.secrets:
+            api_key = st.secrets["GOOGLE_API_KEY"]
+            st.session_state.cached_api_key = api_key  # Cache en mémoire
+            return api_key
+    except:
+        pass
+    
+    # Priorité 2 : Session State (cache mémoire)
+    if 'cached_api_key' in st.session_state and st.session_state.cached_api_key:
+        return st.session_state.cached_api_key
+    
+    # Priorité 3 : Aucune clé disponible
     return None
 
-def save_cached_api_key(api_key: str):
-    """Sauvegarde la clé API dans .streamlit/secrets.toml."""
-    try:
-        SECRETS_PATH.parent.mkdir(exist_ok=True)
-        data = {"GOOGLE_API_KEY": api_key}
-        with open(SECRETS_PATH, 'w') as f:
-            toml.dump(data, f)
-    except Exception as e:
-        st.error(f"Impossible de sauvegarder la clé API : {e}")
+def save_api_key_to_session(api_key: str):
+    """Sauvegarde la clé API en mémoire (session state uniquement)."""
+    st.session_state.cached_api_key = api_key
 
-# --- CLASSE API SERVICE (inspirée de api_service.py) ---
+# --- CLASSE API SERVICE ---
 class WorldBankAPI:
     """Service API Banque Mondiale - Approche REST directe"""
     
@@ -61,12 +70,17 @@ class WorldBankAPI:
         self.session.headers.update({'User-Agent': 'Education-Analytics/1.0'})
     
     def _get_cache_path(self, key: str) -> Path:
-        return CACHE_DIR / f"{key}.pkl"
+        if cache_enabled:
+            return CACHE_DIR / f"{key}.pkl"
+        return None
     
     def _load_cache(self, key: str) -> Optional[pd.DataFrame]:
         """Charge depuis cache si valide (<24h)"""
+        if not cache_enabled:
+            return None
+            
         cache_file = self._get_cache_path(key)
-        if cache_file.exists():
+        if cache_file and cache_file.exists():
             age_hours = (time.time() - cache_file.stat().st_mtime) / 3600
             if age_hours < 24:
                 try:
@@ -78,9 +92,14 @@ class WorldBankAPI:
     
     def _save_cache(self, key: str, data: pd.DataFrame):
         """Sauvegarde en cache"""
+        if not cache_enabled:
+            return
+            
         try:
-            with open(self._get_cache_path(key), 'wb') as f:
-                pickle.dump(data, f)
+            cache_path = self._get_cache_path(key)
+            if cache_path:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(data, f)
         except Exception as e:
             st.warning(f"Impossible de sauvegarder le cache {key}: {e}")
     
@@ -122,9 +141,7 @@ class WorldBankAPI:
                 country_info = record.get('country', {})
                 country_code = country_info.get('id', '')
                 
-                # --- BUG CRITIQUE CORRIGÉ ---
-                # L'API renvoie 'ma', 'sn', 'ke' (minuscules)
-                # La liste 'countries' contient 'MA', 'SN', 'KE' (majuscules)
+                # Correction : l'API renvoie des codes minuscules
                 if not country_code or country_code.upper() not in countries:
                     continue
                 
@@ -132,7 +149,7 @@ class WorldBankAPI:
                     year = int(record.get('date', 0))
                     if start_year <= year <= end_year:
                         records.append({
-                            'country_code': country_code.upper(), # Standardiser en majuscule
+                            'country_code': country_code.upper(),
                             'country_name': country_info.get('value', ''),
                             'year': year,
                             'value': round(float(record.get('value')), 2),
@@ -182,443 +199,271 @@ Le **Maroc** montre une meilleure efficacité de rétention, mais l'écart de 10
 AFRICAN_COUNTRIES = {
     'Afrique du Sud': 'ZA', 'Algérie': 'DZ', 'Angola': 'AO', 'Bénin': 'BJ',
     'Botswana': 'BW', 'Burkina Faso': 'BF', 'Burundi': 'BI', 'Cameroun': 'CM',
-    'Cap-Vert': 'CV', 'Centrafrique': 'CF', 'Comores': 'KM', 'Congo': 'CG',
-    'Congo (RDC)': 'CD', 'Côte d\'Ivoire': 'CI', 'Djibouti': 'DJ', 'Égypte': 'EG',
-    'Érythrée': 'ER', 'Eswatini': 'SZ', 'Éthiopie': 'ET', 'Gabon': 'GA',
-    'Gambie': 'GM', 'Ghana': 'GH', 'Guinée': 'GN', 'Guinée-Bissau': 'GW',
-    'Guinée équatoriale': 'GQ', 'Kenya': 'KE', 'Lesotho': 'LS', 'Libéria': 'LR',
-    'Libye': 'LY', 'Madagascar': 'MG', 'Malawi': 'MW', 'Mali': 'ML',
-    'Maroc': 'MA', 'Maurice': 'MU', 'Mauritanie': 'MR', 'Mozambique': 'MZ',
-    'Namibie': 'NA', 'Niger': 'NE', 'Nigéria': 'NG', 'Ouganda': 'UG',
-    'Rwanda': 'RW', 'Sao Tomé-et-Principe': 'ST', 'Sénégal': 'SN', 'Seychelles': 'SC',
-    'Sierra Leone': 'SL', 'Somalie': 'SO', 'Soudan': 'SD', 'Soudan du Sud': 'SS',
-    'Tanzanie': 'TZ', 'Tchad': 'TD', 'Togo': 'TG', 'Tunisie': 'TN',
-    'Zambie': 'ZM', 'Zimbabwe': 'ZW'
+    'Cap-Vert': 'CV', 'Comores': 'KM', 'Congo (Rép. Dém.)': 'CD', 'Congo (Rép.)': 'CG',
+    'Côte d\'Ivoire': 'CI', 'Djibouti': 'DJ', 'Égypte': 'EG', 'Érythrée': 'ER',
+    'Eswatini': 'SZ', 'Éthiopie': 'ET', 'Gabon': 'GA', 'Gambie': 'GM',
+    'Ghana': 'GH', 'Guinée': 'GN', 'Guinée équatoriale': 'GQ', 'Guinée-Bissau': 'GW',
+    'Kenya': 'KE', 'Lesotho': 'LS', 'Libéria': 'LR', 'Libye': 'LY',
+    'Madagascar': 'MG', 'Malawi': 'MW', 'Mali': 'ML', 'Maroc': 'MA',
+    'Maurice': 'MU', 'Mauritanie': 'MR', 'Mozambique': 'MZ', 'Namibie': 'NA',
+    'Niger': 'NE', 'Nigéria': 'NG', 'Ouganda': 'UG', 'Rwanda': 'RW',
+    'Sao Tomé-et-Principe': 'ST', 'Sénégal': 'SN', 'Seychelles': 'SC', 'Sierra Leone': 'SL',
+    'Somalie': 'SO', 'Soudan': 'SD', 'Soudan du Sud': 'SS', 'Tanzanie': 'TZ',
+    'Tchad': 'TD', 'Togo': 'TG', 'Tunisie': 'TN', 'Zambie': 'ZM',
+    'Zimbabwe': 'ZW'
 }
 
-# --- INDICATEURS ÉDUCATIFS ---
+# --- INDICATEURS DISPONIBLES ---
 INDICATORS = {
-    'SE.PRM.ENRR': 'Taux de scolarisation (Primaire)',
-    'SE.PRM.CMPT.FE.ZS': 'Taux d\'achèvement (Primaire, Filles)',
-    'SE.XPD.TOTL.GD.ZS': 'Dépenses publiques d\'éducation (% du PIB)'
+    "Dépenses publiques d'éducation (% du PIB)": "SE.XPD.TOTL.GD.ZS",
+    "Taux d'achèvement (Primaire, Filles)": "SE.PRM.CMPT.FE.ZS",
+    "Taux de scolarisation (Primaire)": "SE.PRM.NENR"
 }
 
-# --- INTERFACE ---
-st.title("🎓 Démo : De la Donnée Brute à la Recommandation Stratégique")
-st.markdown("Webinaire : Exemples d'usage de l'IA pour l'analyse de données sur l'éducation.")
+# --- FONCTIONS GRAPHIQUES ---
+def create_trend_chart(df: pd.DataFrame, column: str, title: str, yaxis_title: str):
+    """Graphique de tendances temporelles"""
+    fig = go.Figure()
+    
+    for pays in df['Pays'].unique():
+        data_pays = df[df['Pays'] == pays].sort_values('Année')
+        fig.add_trace(go.Scatter(
+            x=data_pays['Année'],
+            y=data_pays[column],
+            mode='lines+markers',
+            name=pays,
+            line=dict(width=3),
+            marker=dict(size=8)
+        ))
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title="Année",
+        yaxis_title=yaxis_title,
+        hovermode='x unified',
+        template='plotly_white',
+        height=500
+    )
+    
+    return fig
 
-# --- SIDEBAR ---
-st.sidebar.header("Configuration de la Démo")
-
-# Clé API (Votre demande)
-st.sidebar.subheader("Configuration IA")
-cached_key = load_cached_api_key()
-
-# Essayer st.secrets comme fallback si le cache est vide
-if not cached_key:
-    try:
-        default_key = st.secrets.get("GOOGLE_API_KEY", "")
-    except:
-        default_key = ""
-else:
-    default_key = cached_key
-
-GOOGLE_API_KEY = st.sidebar.text_input(
-    "Votre Clé API Gemini", 
-    type="password",
-    value=default_key,
-    help="Sera sauvegardée dans .streamlit/secrets.toml pour la prochaine session."
-)
-
-# Sauvegarder la clé si elle est nouvelle ou modifiée
-if GOOGLE_API_KEY and GOOGLE_API_KEY != cached_key:
-    save_cached_api_key(GOOGLE_API_KEY)
-    st.sidebar.success("Clé API sauvegardée localement.")
-
-# Mode Démo
-use_demo_mode = st.sidebar.checkbox(
-    "✅ Activer le Mode Démo (Recommandé)", 
-    value=True,
-    help="Utilise une réponse IA pré-enregistrée pour une démo instantanée."
-)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Configuration des Données")
-
-# Sélection indicateurs
-selected_indicator_names = st.sidebar.multiselect(
-    "Choisissez les Indicateurs :",
-    options=list(INDICATORS.values()),
-    default=list(INDICATORS.values())
-)
-
-# Sélection pays
-selected_country_names = st.sidebar.multiselect(
-    "Choisissez les Pays :",
-    options=list(AFRICAN_COUNTRIES.keys()),
-    default=['Maroc', 'Sénégal', 'Kenya']
-)
-
-# Bouton action
-#start_analysis = st.sidebar.button("🚀 Lancer l'Analyse", type="primary")
-# Bouton action
-if st.sidebar.button("🚀 Lancer l'Analyse", type="primary"):
-    st.session_state.analysis_running = True
-# --- FONCTION ANALYSE IA ---
-def generate_ai_analysis(data_csv: str, countries: List[str], 
-                         indicators: List[str], api_key: str) -> Optional[str]:
-    """Génère analyse via Gemini"""
-    if not api_key:
-        st.error("Clé API Gemini non configurée. Veuillez l'ajouter dans la barre latérale.")
+def create_comparison_chart(df: pd.DataFrame, indicator_cols: List[str], year: int):
+    """Graphique de comparaison pour une année donnée"""
+    data_year = df[df['Année'] == year]
+    
+    if data_year.empty:
         return None
     
+    fig = go.Figure()
+    
+    for indicator in indicator_cols:
+        fig.add_trace(go.Bar(
+            name=indicator,
+            x=data_year['Pays'],
+            y=data_year[indicator],
+            text=data_year[indicator].round(1),
+            textposition='auto',
+        ))
+    
+    fig.update_layout(
+        title=f"Comparaison des Indicateurs en {year}",
+        xaxis_title="Pays",
+        yaxis_title="Valeur",
+        barmode='group',
+        template='plotly_white',
+        height=500
+    )
+    
+    return fig
+
+# --- FONCTION ANALYSE IA ---
+def generate_ai_analysis(data_csv: str, countries: List[str], 
+                        indicators: List[str], api_key: str) -> Optional[str]:
+    """Génère une analyse IA via Gemini"""
     try:
         genai.configure(api_key=api_key)
-        
-        # --- BUG CRITIQUE CORRIGÉ ---
-        # 'gemini-2.5-pro' n'est pas un nom de modèle valide
-        model = genai.GenerativeModel('gemini-2.5-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         prompt = f"""
-Tu es un expert analyste en politiques éducatives internationales.
+Tu es un analyste spécialisé en données éducatives pour l'Afrique. Analyse ce jeu de données et produis un rapport structuré.
 
-**Contexte :** Tu analyses des données de la Banque Mondiale pour {', '.join(countries)} sur : {', '.join(indicators)}.
+**Pays analysés :** {', '.join(countries)}
+**Indicateurs :** {', '.join(indicators)}
 
-**Tâche :** Rédige une analyse concise en français pour un décideur politique.
-
-Structure ta réponse *exactement* ainsi (Markdown) :
-
-### 1. Synthèse des Tendances Clés
-(Liste à puces des 3 points majeurs)
-
-### 2. Interprétation et Anomalies
-(Paragraphe court : corrélations, points surprenants)
-
-### 3. Recommandations Stratégiques
-(Liste numérotée de 2-3 recommandations *concrètes* et *actionnables*)
-
-Données CSV :
+**Données CSV :**
 {data_csv}
+
+**Instructions :**
+1. Identifie 3-4 tendances ou patterns clés dans les données
+2. Signale toute anomalie ou écart significatif
+3. Propose 2-3 recommandations concrètes basées sur les données
+
+Utilise le format markdown avec des sections claires. Sois précis et facile à lire.
 """
         
         response = model.generate_content(prompt)
         return response.text
         
     except Exception as e:
-        st.error(f"Erreur Gemini : {e}")
+        st.error(f"Erreur Gemini : {str(e)}")
         return None
 
-# --- FONCTIONS VISUALISATION ---
-def create_trend_chart(df: pd.DataFrame, indicator_col: str, title: str, 
-                       y_label: str, color_scheme: str = "Set2") -> go.Figure:
-    """Crée un graphique d'évolution temporelle professionnel"""
+def format_ai_analysis(analysis_text: str):
+    """Formatte l'analyse IA avec style"""
+    lines = analysis_text.split('\n')
     
-    # Palette de couleurs professionnelle
-    colors = px.colors.qualitative.Set2
+    for line in lines:
+        if line.strip().startswith('###'):
+            st.markdown(f"**{line.strip()}**")
+        elif line.strip().startswith('*'):
+            st.markdown(line)
+        elif line.strip().startswith('-'):
+            st.markdown(line)
+        elif re.match(r'^\d+\.', line.strip()):
+            st.markdown(line)
+        elif line.strip():
+            st.write(line)
+
+# --- INTERFACE PRINCIPALE ---
+st.title("🎓 Analyse IA des Données Éducatives Africaines")
+st.markdown("*Propulsé par l'API Banque Mondiale & Google Gemini*")
+
+# --- SIDEBAR : CONFIGURATION ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
     
-    fig = go.Figure()
+    # --- GESTION DE LA CLÉ API (CORRIGÉE) ---
+    st.subheader("🔑 Clé API Google")
     
-    # Ajouter une trace par pays
-    for idx, country in enumerate(df['Pays'].unique()):
-        country_data = df[df['Pays'] == country].sort_values('Année')
+    # Vérifier si une clé existe déjà
+    existing_key = get_api_key()
+    
+    if existing_key:
+        st.success("✅ Clé API configurée")
+        if st.button("🔄 Changer la clé API"):
+            st.session_state.cached_api_key = None
+            st.rerun()
+        GOOGLE_API_KEY = existing_key
+    else:
+        st.info("Configurez votre clé API Google Gemini")
+        st.markdown("[Obtenir une clé API gratuite](https://makersuite.google.com/app/apikey)")
         
-        # Filtrer les valeurs non nulles
-        valid_data = country_data[country_data[indicator_col].notna()]
+        api_input = st.text_input(
+            "Clé API",
+            type="password",
+            placeholder="AIzaSy..."
+        )
         
-        if not valid_data.empty:
-            fig.add_trace(go.Scatter(
-                x=valid_data['Année'],
-                y=valid_data[indicator_col],
-                name=country,
-                mode='lines+markers',
-                line=dict(width=3, color=colors[idx % len(colors)]),
-                marker=dict(size=8, symbol='circle', 
-                           line=dict(width=2, color='white')),
-                hovertemplate='<b>%{fullData.name}</b><br>' +
-                             'Année: %{x}<br>' +
-                             f'{y_label}: %{{y:.2f}}<br>' +
-                             '<extra></extra>'
-            ))
+        if api_input:
+            save_api_key_to_session(api_input)
+            GOOGLE_API_KEY = api_input
+            st.success("✅ Clé API sauvegardée en mémoire")
+            st.rerun()
+        else:
+            GOOGLE_API_KEY = None
     
-    # Mise en page professionnelle
-    fig.update_layout(
-        title=dict(
-            text=title,
-            font=dict(size=20, family='Arial, sans-serif', color='#2c3e50'),
-            x=0.5,
-            xanchor='center'
-        ),
-        xaxis=dict(
-            title='Année',
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(128,128,128,0.2)',
-            zeroline=False,
-            tickfont=dict(size=12),
-            titlefont=dict(size=14, family='Arial, sans-serif')
-        ),
-        yaxis=dict(
-            title=y_label,
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(128,128,128,0.2)',
-            zeroline=False,
-            tickfont=dict(size=12),
-            titlefont=dict(size=14, family='Arial, sans-serif')
-        ),
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        hovermode='x unified',
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=12),
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='rgba(128,128,128,0.3)',
-            borderwidth=1
-        ),
-        height=500,
-        margin=dict(l=80, r=40, t=100, b=80)
+    # Mode démo si pas de clé
+    use_demo_mode = False
+    if not GOOGLE_API_KEY:
+        st.warning("⚠️ Aucune clé API : passage en mode démo")
+        use_demo_mode = True
+    
+    st.markdown("---")
+    
+    # --- SÉLECTION PAYS ---
+    st.subheader("🌍 Pays")
+    selected_countries = st.multiselect(
+        "Choisissez 2-5 pays africains",
+        options=sorted(AFRICAN_COUNTRIES.keys()),
+        default=['Maroc', 'Sénégal', 'Kenya'],
+        max_selections=5
     )
     
-    return fig
-
-def format_ai_analysis(analysis_text: str) -> None:
-    """Affiche l'analyse IA avec mise en forme attractive"""
-    
-    # CSS personnalisé pour les cards
-    st.markdown("""
-    <style>
-    .analysis-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        margin: 1.5rem 0;
-        box-shadow: 0 10px 30px rgba(102, 126, 234, 0.2);
-        color: white;
-    }
-    .section-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
-        margin: 1rem 0;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.08);
-        border-left: 5px solid #667eea;
-    }
-    .section-title {
-        color: #667eea;
-        font-size: 1.5rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    .insight-item {
-        background: #f8f9fa;
-        padding: 0.8rem 1.2rem;
-        margin: 0.5rem 0;
-        border-radius: 8px;
-        border-left: 3px solid #764ba2;
-        font-size: 0.95rem;
-        line-height: 1.6;
-    }
-    .recommendation-item {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
-        padding: 1rem 1.2rem;
-        margin: 0.8rem 0;
-        border-radius: 10px;
-        font-size: 0.95rem;
-        line-height: 1.6;
-        box-shadow: 0 4px 12px rgba(240, 147, 251, 0.3);
-    }
-    .recommendation-number {
-        background: white;
-        color: #f5576c;
-        padding: 0.2rem 0.6rem;
-        border-radius: 50%;
-        font-weight: bold;
-        margin-right: 0.5rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Header principal
-    st.markdown("""
-    <div class="analysis-card">
-        <h2 style="margin: 0; font-size: 2rem;">🤖 Analyse IA & Recommandations Stratégiques</h2>
-        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Analyse générée par Gemini 2.5 Pro</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Parser le texte pour extraire les sections
-    sections = analysis_text.split('###')
-    
-    for section in sections:
-        if not section.strip():
-            continue
-            
-        lines = section.strip().split('\n')
-        title = lines[0].strip()
-        content = '\n'.join(lines[1:]).strip()
-        
-        if '1.' in title and 'Synthèse' in title:
-            # Section Synthèse
-            st.markdown("""
-            <div class="section-card">
-                <div class="section-title">📊 Synthèse des Tendances Clés</div>
-            """, unsafe_allow_html=True)
-            
-            # Parser les bullet points
-            for line in content.split('\n'):
-                if line.strip().startswith('*'):
-                    insight = line.strip()[1:].strip()
-                    st.markdown(f'<div class="insight-item">• {insight}</div>', unsafe_allow_html=True)
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-            
-        elif '2.' in title and 'Interprétation' in title:
-            # Section Interprétation
-            st.markdown("""
-            <div class="section-card">
-                <div class="section-title">🔍 Interprétation et Anomalies</div>
-            """, unsafe_allow_html=True)
-            
-            # Afficher le contenu en paragraphes
-            for para in content.split('\n\n'):
-                if para.strip():
-                    st.markdown(f'<div class="insight-item">{para.strip()}</div>', unsafe_allow_html=True)
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-            
-        elif '3.' in title and 'Recommandations' in title:
-            # Section Recommandations
-            st.markdown("""
-            <div class="section-card">
-                <div class="section-title">💡 Recommandations Stratégiques</div>
-            """, unsafe_allow_html=True)
-            
-            # Parser les recommandations numérotées
-            # (import re est maintenant en haut du fichier)
-            recommendations = re.findall(r'\d+\.\s+(.+?)(?=\d+\.|$)', content, re.DOTALL)
-            
-            for idx, rec in enumerate(recommendations, 1):
-                rec_clean = rec.strip()
-                st.markdown(
-                    f'<div class="recommendation-item">'
-                    f'<span class="recommendation-number">{idx}</span>'
-                    f'{rec_clean}'
-                    f'</div>', 
-                    unsafe_allow_html=True
-                )
-            
-            st.markdown("</div>", unsafe_allow_html=True)
-
-def create_comparison_chart(df: pd.DataFrame, indicators: List[str], 
-                           selected_year: int) -> go.Figure:
-    """Crée un graphique comparatif multi-indicateurs (année sélectionnée)"""
-    
-    # Filtrer l'année sélectionnée
-    latest_data = df[df['Année'] == selected_year].copy()
-    
-    if latest_data.empty:
-        # Note : Le st.info() est maintenant géré dans la logique principale
-        return None
-    
-    colors = ['#667eea', '#f093fb', '#4facfe']
-    
-    fig = go.Figure()
-    
-    for idx, indicator in enumerate(indicators):
-        if indicator in latest_data.columns:
-            fig.add_trace(go.Bar(
-                name=indicator,
-                x=latest_data['Pays'],
-                y=latest_data[indicator],
-                marker=dict(
-                    color=colors[idx % len(colors)],
-                    line=dict(color='white', width=2)
-                ),
-                text=latest_data[indicator].round(1),
-                textposition='outside',
-                textfont=dict(size=11, color='#2c3e50'),
-                hovertemplate='<b>%{x}</b><br>' +
-                             f'{indicator}: %{{y:.2f}}<br>' +
-                             '<extra></extra>'
-            ))
-    
-    fig.update_layout(
-        title=dict(
-            text=f'Comparaison des Indicateurs ({selected_year})',
-            font=dict(size=20, family='Arial, sans-serif', color='#2c3e50'),
-            x=0.5,
-            xanchor='center'
-        ),
-        xaxis=dict(
-            title='Pays',
-            tickfont=dict(size=12),
-            titlefont=dict(size=14)
-        ),
-        yaxis=dict(
-            title='Valeur',
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(128,128,128,0.2)',
-            tickfont=dict(size=12),
-            titlefont=dict(size=14)
-        ),
-        barmode='group',
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=12),
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='rgba(128,128,128,0.3)',
-            borderwidth=1
-        ),
-        height=500,
-        margin=dict(l=80, r=40, t=100, b=80)
+    # --- SÉLECTION INDICATEURS ---
+    st.subheader("📊 Indicateurs")
+    selected_indicators = st.multiselect(
+        "Choisissez 1-3 indicateurs",
+        options=list(INDICATORS.keys()),
+        default=list(INDICATORS.keys())
     )
     
-    return fig
+    # --- PÉRIODE ---
+    st.subheader("📅 Période")
+    year_range = st.slider(
+        "Années",
+        min_value=2000,
+        max_value=2024,
+        value=(2010, 2022)
+    )
+    
+    st.markdown("---")
+    
+    # --- BOUTON DE LANCEMENT ---
+    launch_button = st.button(
+        "🚀 Lancer l'Analyse",
+        type="primary",
+        use_container_width=True
+    )
 
 # --- LOGIQUE PRINCIPALE ---
+if launch_button:
+    # Validation
+    if len(selected_countries) < 2:
+        st.error("❌ Veuillez sélectionner au moins 2 pays.")
+        st.stop()
+    
+    if not selected_indicators:
+        st.error("❌ Veuillez sélectionner au moins 1 indicateur.")
+        st.stop()
+    
+    st.session_state.analysis_running = True
+
 if st.session_state.analysis_running:
-    if not selected_indicator_names or not selected_country_names:
-#if start_analysis:
-    #if not selected_indicator_names or not selected_country_names:
-        st.warning("Veuillez sélectionner au moins un indicateur et un pays.")
-    else:
-        # Mapper codes
-        indicator_codes = {code: name for code, name in INDICATORS.items() 
-                          if name in selected_indicator_names}
-        country_codes = [AFRICAN_COUNTRIES[name] for name in selected_country_names]
-        
-        # Initialiser API
+    # Préparer les données
+    selected_country_codes = [AFRICAN_COUNTRIES[c] for c in selected_countries]
+    selected_country_names = selected_countries
+    selected_indicator_codes = [INDICATORS[i] for i in selected_indicators]
+    selected_indicator_names = selected_indicators
+    
+    # Afficher les sélections
+    with st.expander("📋 Résumé de la configuration", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.write("**Pays :**", ", ".join(selected_country_names))
+        with col2:
+            st.write("**Indicateurs :**", len(selected_indicators))
+        with col3:
+            st.write("**Période :**", f"{year_range[0]}-{year_range[1]}")
+    
+    # Créer barre de progression
+    progress_bar = st.progress(0, text="Initialisation...")
+    
+    # --- ÉTAPE 1 : RÉCUPÉRATION DES DONNÉES ---
+    with st.spinner("Étape 1/3 : Récupération des données depuis l'API Banque Mondiale..."):
         api = WorldBankAPI()
+        all_data = []
         
-        # --- ÉTAPE 1 : RÉCUPÉRATION DONNÉES ---
-        with st.spinner("Étape 1/3 : Chargement des données depuis l'API de la Banque Mondiale..."):
-            all_data = []
+        total_calls = len(selected_indicator_codes)
+        
+        for idx, (indicator_code, indicator_name) in enumerate(zip(selected_indicator_codes, selected_indicator_names)):
+            progress = (idx + 1) / total_calls
+            progress_bar.progress(progress, text=f"Récupération : {indicator_name}")
             
-            for indicator_code, indicator_name in indicator_codes.items():
-                df = api.fetch_indicator(indicator_code, country_codes, 2010, 2022)
-                
-                if not df.empty:
-                    df['indicator_name'] = indicator_name
-                    all_data.append(df)
-                
-                time.sleep(0.2)  # Rate limiting
+            df = api.fetch_indicator(
+                indicator_code,
+                selected_country_codes,
+                year_range[0],
+                year_range[1]
+            )
             
+            if not df.empty:
+                df['indicator_name'] = indicator_name
+                all_data.append(df)
+        
+        progress_bar.empty()
+        
+        # --- ÉTAPE 2 : TRAITEMENT & VISUALISATION ---
+        with st.spinner("Étape 2/3 : Traitement et visualisation des données..."):
             if not all_data:
                 st.error("Aucune donnée récupérée pour les filtres sélectionnés.")
                 st.stop()
@@ -712,10 +557,9 @@ if st.session_state.analysis_running:
                 selected_year = st.selectbox(
                     "Choisissez l'année de comparaison :", 
                     options=available_years,
-                    index=0 # Par défaut, la plus récente
+                    index=0
                 )
                 
-                # --- VÉRIFICATION DE DISPONIBILITÉ (Votre demande) ---
                 if selected_year:
                     # Trouver les pays qui ont des données pour cette année
                     data_for_year = pivot_df[pivot_df['Année'] == selected_year]
@@ -732,8 +576,7 @@ if st.session_state.analysis_running:
                             f"**Données non disponibles pour {selected_year} pour :** "
                             f"{', '.join(countries_missing_data)}"
                         )
-                # --- FIN DE LA VÉRIFICATION ---
-
+                    
                     # Générer le graphique
                     fig4 = create_comparison_chart(
                         pivot_df,
@@ -747,7 +590,7 @@ if st.session_state.analysis_running:
                         st.info(f"Aucune donnée à afficher pour les pays trouvés en {selected_year}.")
         
         with tabs[4]: # Données brutes
-            st.markdown(f"**Pays :** {', '.join(selected_country_names)}  \n**Période :** 2010-2022")
+            st.markdown(f"**Pays :** {', '.join(selected_country_names)}  \n**Période :** {year_range[0]}-{year_range[1]}")
             st.dataframe(pivot_df, use_container_width=True)
             
             # Option d'export
@@ -772,7 +615,7 @@ if st.session_state.analysis_running:
                     data_csv, 
                     selected_country_names, 
                     selected_indicator_names,
-                    GOOGLE_API_KEY  # Passer la clé
+                    GOOGLE_API_KEY
                 )
                 
                 if analysis:
@@ -790,16 +633,21 @@ st.sidebar.markdown("---")
 # Ajouter un bouton pour réinitialiser
 if st.sidebar.button("🔄 Réinitialiser l'Analyse"):
     st.session_state.analysis_running = False
-    st.rerun() # Force un re-chargement immédiat
+    st.rerun()
     
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Cache API :** {len(list(CACHE_DIR.glob('*.pkl')))} fichiers")
-if st.sidebar.button("🗑️ Vider le cache API"):
-    count = 0
-    for f in CACHE_DIR.glob('*.pkl'):
-        try:
-            f.unlink()
-            count += 1
-        except:
-            pass
-    st.sidebar.success(f"{count} fichiers cache vidés!")
+
+# Afficher le cache seulement si disponible
+if cache_enabled:
+    st.sidebar.markdown(f"**Cache API :** {len(list(CACHE_DIR.glob('*.pkl')))} fichiers")
+    if st.sidebar.button("🗑️ Vider le cache API"):
+        count = 0
+        for f in CACHE_DIR.glob('*.pkl'):
+            try:
+                f.unlink()
+                count += 1
+            except:
+                pass
+        st.sidebar.success(f"{count} fichiers cache vidés!")
+else:
+    st.sidebar.markdown("**Cache API :** Désactivé (cloud)")
