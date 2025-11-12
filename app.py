@@ -8,6 +8,8 @@ from typing import Dict, List, Optional
 import google.generativeai as genai
 import plotly.graph_objects as go
 import plotly.express as px
+import toml  # Ajouté pour gérer le cache de la clé API
+import re    # Ajouté (depuis la fonction format_ai_analysis)
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -15,10 +17,38 @@ st.set_page_config(
     page_icon="🎓",
     layout="wide"
 )
-
+# Initialiser le session state
+if 'analysis_running' not in st.session_state:
+    st.session_state.analysis_running = False
 # Créer dossier cache
 CACHE_DIR = Path("data_cache")
 CACHE_DIR.mkdir(exist_ok=True)
+
+# Définir le chemin pour le cache de la clé API
+SECRETS_PATH = Path(".streamlit/secrets.toml")
+
+# --- GESTION CLÉ API (Votre demande) ---
+
+def load_cached_api_key() -> Optional[str]:
+    """Charge la clé API depuis .streamlit/secrets.toml si elle existe."""
+    if SECRETS_PATH.exists():
+        try:
+            with open(SECRETS_PATH, 'r') as f:
+                data = toml.load(f)
+                return data.get("GOOGLE_API_KEY")
+        except Exception as e:
+            st.error(f"Erreur en chargeant secrets.toml : {e}")
+    return None
+
+def save_cached_api_key(api_key: str):
+    """Sauvegarde la clé API dans .streamlit/secrets.toml."""
+    try:
+        SECRETS_PATH.parent.mkdir(exist_ok=True)
+        data = {"GOOGLE_API_KEY": api_key}
+        with open(SECRETS_PATH, 'w') as f:
+            toml.dump(data, f)
+    except Exception as e:
+        st.error(f"Impossible de sauvegarder la clé API : {e}")
 
 # --- CLASSE API SERVICE (inspirée de api_service.py) ---
 class WorldBankAPI:
@@ -42,8 +72,8 @@ class WorldBankAPI:
                 try:
                     with open(cache_file, 'rb') as f:
                         return pickle.load(f)
-                except:
-                    pass
+                except Exception as e:
+                    st.warning(f"Impossible de lire le cache {cache_file}: {e}")
         return None
     
     def _save_cache(self, key: str, data: pd.DataFrame):
@@ -51,11 +81,11 @@ class WorldBankAPI:
         try:
             with open(self._get_cache_path(key), 'wb') as f:
                 pickle.dump(data, f)
-        except:
-            pass
+        except Exception as e:
+            st.warning(f"Impossible de sauvegarder le cache {key}: {e}")
     
     def fetch_indicator(self, indicator_code: str, countries: List[str], 
-                       start_year: int = 2010, end_year: int = 2022) -> pd.DataFrame:
+                       start_year: int = 2010, end_year: int = 2024) -> pd.DataFrame:
         """Récupère données pour un indicateur via API REST"""
         
         cache_key = f"{indicator_code}_{'_'.join(countries)}_{start_year}_{end_year}"
@@ -92,15 +122,17 @@ class WorldBankAPI:
                 country_info = record.get('country', {})
                 country_code = country_info.get('id', '')
                 
-                # Filtrer les codes pays sélectionnés
-                if country_code not in countries:
+                # --- BUG CRITIQUE CORRIGÉ ---
+                # L'API renvoie 'ma', 'sn', 'ke' (minuscules)
+                # La liste 'countries' contient 'MA', 'SN', 'KE' (majuscules)
+                if not country_code or country_code.upper() not in countries:
                     continue
                 
                 try:
                     year = int(record.get('date', 0))
                     if start_year <= year <= end_year:
                         records.append({
-                            'country_code': country_code,
+                            'country_code': country_code.upper(), # Standardiser en majuscule
                             'country_name': country_info.get('value', ''),
                             'year': year,
                             'value': round(float(record.get('value')), 2),
@@ -178,15 +210,30 @@ st.markdown("Webinaire : Exemples d'usage de l'IA pour l'analyse de données sur
 # --- SIDEBAR ---
 st.sidebar.header("Configuration de la Démo")
 
-# Clé API
-try:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except:
-    GOOGLE_API_KEY = st.sidebar.text_input(
-        "Votre Clé API Gemini", 
-        type="password",
-        help="Nécessaire uniquement si le 'Mode Démo' est désactivé."
-    )
+# Clé API (Votre demande)
+st.sidebar.subheader("Configuration IA")
+cached_key = load_cached_api_key()
+
+# Essayer st.secrets comme fallback si le cache est vide
+if not cached_key:
+    try:
+        default_key = st.secrets.get("GOOGLE_API_KEY", "")
+    except:
+        default_key = ""
+else:
+    default_key = cached_key
+
+GOOGLE_API_KEY = st.sidebar.text_input(
+    "Votre Clé API Gemini", 
+    type="password",
+    value=default_key,
+    help="Sera sauvegardée dans .streamlit/secrets.toml pour la prochaine session."
+)
+
+# Sauvegarder la clé si elle est nouvelle ou modifiée
+if GOOGLE_API_KEY and GOOGLE_API_KEY != cached_key:
+    save_cached_api_key(GOOGLE_API_KEY)
+    st.sidebar.success("Clé API sauvegardée localement.")
 
 # Mode Démo
 use_demo_mode = st.sidebar.checkbox(
@@ -213,17 +260,23 @@ selected_country_names = st.sidebar.multiselect(
 )
 
 # Bouton action
-start_analysis = st.sidebar.button("🚀 Lancer l'Analyse", type="primary")
-
+#start_analysis = st.sidebar.button("🚀 Lancer l'Analyse", type="primary")
+# Bouton action
+if st.sidebar.button("🚀 Lancer l'Analyse", type="primary"):
+    st.session_state.analysis_running = True
 # --- FONCTION ANALYSE IA ---
-def generate_ai_analysis(data_csv: str, countries: List[str], indicators: List[str]) -> Optional[str]:
+def generate_ai_analysis(data_csv: str, countries: List[str], 
+                         indicators: List[str], api_key: str) -> Optional[str]:
     """Génère analyse via Gemini"""
-    if not GOOGLE_API_KEY:
-        st.error("Clé API Gemini non configurée.")
+    if not api_key:
+        st.error("Clé API Gemini non configurée. Veuillez l'ajouter dans la barre latérale.")
         return None
     
     try:
-        genai.configure(api_key=GOOGLE_API_KEY)
+        genai.configure(api_key=api_key)
+        
+        # --- BUG CRITIQUE CORRIGÉ ---
+        # 'gemini-2.5-pro' n'est pas un nom de modèle valide
         model = genai.GenerativeModel('gemini-2.5-pro')
         
         prompt = f"""
@@ -398,7 +451,7 @@ def format_ai_analysis(analysis_text: str) -> None:
     st.markdown("""
     <div class="analysis-card">
         <h2 style="margin: 0; font-size: 2rem;">🤖 Analyse IA & Recommandations Stratégiques</h2>
-        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Analyse généée par Gemini 2.5 Pro</p>
+        <p style="margin: 0.5rem 0 0 0; opacity: 0.9;">Analyse générée par Gemini 2.5 Pro</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -450,7 +503,7 @@ def format_ai_analysis(analysis_text: str) -> None:
             """, unsafe_allow_html=True)
             
             # Parser les recommandations numérotées
-            import re
+            # (import re est maintenant en haut du fichier)
             recommendations = re.findall(r'\d+\.\s+(.+?)(?=\d+\.|$)', content, re.DOTALL)
             
             for idx, rec in enumerate(recommendations, 1):
@@ -466,13 +519,14 @@ def format_ai_analysis(analysis_text: str) -> None:
             st.markdown("</div>", unsafe_allow_html=True)
 
 def create_comparison_chart(df: pd.DataFrame, indicators: List[str], 
-                           latest_year: int) -> go.Figure:
-    """Crée un graphique comparatif multi-indicateurs (dernière année)"""
+                           selected_year: int) -> go.Figure:
+    """Crée un graphique comparatif multi-indicateurs (année sélectionnée)"""
     
-    # Filtrer dernière année disponible
-    latest_data = df[df['Année'] == latest_year].copy()
+    # Filtrer l'année sélectionnée
+    latest_data = df[df['Année'] == selected_year].copy()
     
     if latest_data.empty:
+        # Note : Le st.info() est maintenant géré dans la logique principale
         return None
     
     colors = ['#667eea', '#f093fb', '#4facfe']
@@ -499,7 +553,7 @@ def create_comparison_chart(df: pd.DataFrame, indicators: List[str],
     
     fig.update_layout(
         title=dict(
-            text=f'Comparaison des Indicateurs ({latest_year})',
+            text=f'Comparaison des Indicateurs ({selected_year})',
             font=dict(size=20, family='Arial, sans-serif', color='#2c3e50'),
             x=0.5,
             xanchor='center'
@@ -538,8 +592,10 @@ def create_comparison_chart(df: pd.DataFrame, indicators: List[str],
     return fig
 
 # --- LOGIQUE PRINCIPALE ---
-if start_analysis:
+if st.session_state.analysis_running:
     if not selected_indicator_names or not selected_country_names:
+#if start_analysis:
+    #if not selected_indicator_names or not selected_country_names:
         st.warning("Veuillez sélectionner au moins un indicateur et un pays.")
     else:
         # Mapper codes
@@ -564,7 +620,7 @@ if start_analysis:
                 time.sleep(0.2)  # Rate limiting
             
             if not all_data:
-                st.error("Aucune donnée récupérée.")
+                st.error("Aucune donnée récupérée pour les filtres sélectionnés.")
                 st.stop()
             
             # Combiner les données
@@ -585,6 +641,10 @@ if start_analysis:
             # Nettoyer lignes vides
             indicator_cols = [col for col in pivot_df.columns if col not in ['Pays', 'Année']]
             pivot_df = pivot_df.dropna(subset=indicator_cols, how='all')
+            
+            if pivot_df.empty:
+                st.error("Données vides après pivotage. Vérifiez les plages de dates.")
+                st.stop()
         
         # Afficher données
         st.subheader("1. Aperçu des Données")
@@ -594,15 +654,16 @@ if start_analysis:
         st.subheader("2. Visualisations des Tendances")
         
         # Créer tabs pour organiser les graphiques
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab_list = [
             "📈 Dépenses Publiques", 
             "🎓 Taux d'Achèvement (Filles)", 
             "📚 Taux de Scolarisation",
             "📊 Comparaison",
             "📋 Données Brutes"
-        ])
+        ]
+        tabs = st.tabs(tab_list)
         
-        with tab1:
+        with tabs[0]: # Dépenses
             if 'Dépenses publiques d\'éducation (% du PIB)' in pivot_df.columns:
                 fig1 = create_trend_chart(
                     pivot_df,
@@ -612,9 +673,9 @@ if start_analysis:
                 )
                 st.plotly_chart(fig1, use_container_width=True)
             else:
-                st.info("Données non disponibles pour cet indicateur")
+                st.info("Indicateur 'Dépenses publiques' non sélectionné ou données non disponibles.")
         
-        with tab2:
+        with tabs[1]: # Achèvement Filles
             if 'Taux d\'achèvement (Primaire, Filles)' in pivot_df.columns:
                 fig2 = create_trend_chart(
                     pivot_df,
@@ -624,9 +685,9 @@ if start_analysis:
                 )
                 st.plotly_chart(fig2, use_container_width=True)
             else:
-                st.info("Données non disponibles pour cet indicateur")
+                st.info("Indicateur 'Taux d'achèvement (Filles)' non sélectionné ou données non disponibles.")
         
-        with tab3:
+        with tabs[2]: # Scolarisation
             if 'Taux de scolarisation (Primaire)' in pivot_df.columns:
                 fig3 = create_trend_chart(
                     pivot_df,
@@ -636,22 +697,56 @@ if start_analysis:
                 )
                 st.plotly_chart(fig3, use_container_width=True)
             else:
-                st.info("Données non disponibles pour cet indicateur")
+                st.info("Indicateur 'Taux de scolarisation' non sélectionné ou données non disponibles.")
         
-        with tab4:
-            # Comparaison dernière année disponible
-            latest_year = pivot_df['Année'].max()
-            fig4 = create_comparison_chart(
-                pivot_df,
-                indicator_cols,
-                latest_year
-            )
-            if fig4:
-                st.plotly_chart(fig4, use_container_width=True)
+        with tabs[3]: # Comparaison
+            st.markdown("##### 🔬 Comparaison Annuelle")
+            
+            # Récupérer les années disponibles, triées de la plus récente à la plus ancienne
+            available_years = sorted(pivot_df['Année'].unique(), reverse=True)
+            
+            if not available_years:
+                st.warning("Aucune donnée annuelle à comparer.")
             else:
-                st.info("Données insuffisantes pour la comparaison")
+                # Créer le sélecteur d'année
+                selected_year = st.selectbox(
+                    "Choisissez l'année de comparaison :", 
+                    options=available_years,
+                    index=0 # Par défaut, la plus récente
+                )
+                
+                # --- VÉRIFICATION DE DISPONIBILITÉ (Votre demande) ---
+                if selected_year:
+                    # Trouver les pays qui ont des données pour cette année
+                    data_for_year = pivot_df[pivot_df['Année'] == selected_year]
+                    countries_with_data = data_for_year['Pays'].unique()
+                    
+                    # Comparer avec la liste complète des pays sélectionnés
+                    countries_missing_data = [
+                        pays for pays in selected_country_names 
+                        if pays not in countries_with_data
+                    ]
+                    
+                    if countries_missing_data:
+                        st.warning(
+                            f"**Données non disponibles pour {selected_year} pour :** "
+                            f"{', '.join(countries_missing_data)}"
+                        )
+                # --- FIN DE LA VÉRIFICATION ---
+
+                    # Générer le graphique
+                    fig4 = create_comparison_chart(
+                        pivot_df,
+                        indicator_cols,
+                        selected_year
+                    )
+                    
+                    if fig4:
+                        st.plotly_chart(fig4, use_container_width=True)
+                    else:
+                        st.info(f"Aucune donnée à afficher pour les pays trouvés en {selected_year}.")
         
-        with tab5:
+        with tabs[4]: # Données brutes
             st.markdown(f"**Pays :** {', '.join(selected_country_names)}  \n**Période :** 2010-2022")
             st.dataframe(pivot_df, use_container_width=True)
             
@@ -676,20 +771,35 @@ if start_analysis:
                 analysis = generate_ai_analysis(
                     data_csv, 
                     selected_country_names, 
-                    selected_indicator_names
+                    selected_indicator_names,
+                    GOOGLE_API_KEY  # Passer la clé
                 )
                 
                 if analysis:
                     format_ai_analysis(analysis)
                     st.success("✅ Analyse générée avec succès par Gemini.")
+                else:
+                    st.error("L'analyse IA a échoué. Vérifiez la clé API et la console.")
 
 else:
     st.info("👈 Utilisez la barre latérale pour configurer votre analyse et cliquez sur 'Lancer l'Analyse'.")
 
 # --- FOOTER ---
 st.sidebar.markdown("---")
-st.sidebar.markdown(f"**Cache :** {len(list(CACHE_DIR.glob('*.pkl')))} fichiers")
-if st.sidebar.button("🗑️ Vider le cache"):
+
+# Ajouter un bouton pour réinitialiser
+if st.sidebar.button("🔄 Réinitialiser l'Analyse"):
+    st.session_state.analysis_running = False
+    st.rerun() # Force un re-chargement immédiat
+    
+st.sidebar.markdown("---")
+st.sidebar.markdown(f"**Cache API :** {len(list(CACHE_DIR.glob('*.pkl')))} fichiers")
+if st.sidebar.button("🗑️ Vider le cache API"):
+    count = 0
     for f in CACHE_DIR.glob('*.pkl'):
-        f.unlink()
-    st.sidebar.success("Cache vidé!")
+        try:
+            f.unlink()
+            count += 1
+        except:
+            pass
+    st.sidebar.success(f"{count} fichiers cache vidés!")
